@@ -45,7 +45,6 @@ public int remove_item(buffer_item *item){
 }
 
 /*Producer*/
-
 public void *producer(void *param){
 	buffer_item rand;
 	
