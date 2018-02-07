@@ -1,4 +1,5 @@
 #include<stdlib.h>
+#include<stdio.h>
 #include<pthread.h>
 #include<semaphore.h>
 #define BUFFER_SIZE 5;
@@ -30,16 +31,15 @@ public int insert_item(buffer_item item){
 
 public int remove_item(buffer_item *item){
 	int i;
-	if(currentSize<=0){
-		printf("error: the buffer is empty\n");
-		return -1;
-	}else{
-		*item=buffer[0];
-		for(i=1;i<currentSize;i++){
-			buffer[i-1]=buffer[i];		
-		}
+	if(currentSize>0){
+		*item=buffer[currentSize-1];
 		currentSize--;
 		printf("consumer consumed %d\n", *item);
+		return 0;
+	
+	}else{
+		printf("error: the buffer is empty\n");
+		return -1;
 	}
 
 }
@@ -51,11 +51,12 @@ public void *producer(void *param){
 	while(1){
 		sleep(rand());
 		sem_wait(&empty);
-		pthread_mutex_lock(&mutex);/*critical section*/
+		/*acquire mutex lock*/
+		pthread_mutex_lock(&mutex);
 		rand=rand_r(&seed);
 		if(insert_item(rand)<0)
 			printf("error\n");	
-		
+		/*release mutex lock*/
 		pthread_mutex_unlock(&mutex);
 		sem_post(&full);
 	}
@@ -67,10 +68,11 @@ public void *consumer(void *param){
 	while(1){
 		sleep(rand();
 		sem_wait(&full);
-		pthread_mutex_lock(&mutex);/*critical section*/
+		/*acquire mutex lock*/
+		pthread_mutex_lock(&mutex);
 		if(remove_item(&rand)<0)
 			printf("error\n");
-		
+		/*release mutex lock*/
 		pthread_mutex_unlock(&mutex);
 		sem_post(&empty);
 		
@@ -78,18 +80,18 @@ public void *consumer(void *param){
 }
 
 int main(int argc, char *argv[]){
-	int i;
+	int i; /*loop counter*/
 	int sleepTime;
 	int num_producer;
 	int num_consumer;
-	if(argc ==1){
-		printf("Usage: ./thread num_threads \n");
+	if(argc !=4){
+		fprintf(stderr, "Usage: ./main.out <sleep_time> <num_producer> <num_consumer>\n");
 		exit(EUSE);	
 	}
 	/*get sleep time, number of producers, number of consumers from commandline*/
-	sleepTime=atoi(argv[0]);
-	num_producer=atoi(argv[1]);
-	num_consumer=atoi(argv[2]);
+	sleepTime=atoi(argv[1]);
+	num_producer=atoi(argv[2]);
+	num_consumer=atoi(argv[4]);
 	pthread_t tid_p[num_producer];
 	pthread_t tid_c[num_consumer];
 	
