@@ -1,234 +1,257 @@
+/*Author: Xuyang Zhang*/
+/*readme:
+*/
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <signal.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <string.h>
-#include <errno.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
-/*
- * Constant Declarations
+
+#define MAX_LINE 80 /* 80 chars per line, per command, should be enough. */
+#define CMD_HIST 10 /*10 command histories*/
+
+
+/*10 histories, each history are allowed to have up to 40 args, and each args up to 80 chars*/
+char histories[CMD_HIST][MAX_LINE/2+1][MAX_LINE];
+
+int backgrounds[CMD_HIST];
+int num_hist = 0;
+int latest_cmd = -1;
+int flag = 0; /* true if caught Ctrl C */
+
+
+
+/* copy the command into the history */
+void copycmd(int idx, char *args[]) {
+	int i = 0;
+	while (args[i]) {
+		strncpy(histories[idx][i], args[i], strlen(args[i])+1);
+		++i;
+	}
+	histories[idx][i][0] = '\0';
+}
+
+/* return the index of the given command */
+int return_cmd(char *args[]) {
+	int i;
+	for (i = 0; i < num_hist; ++i) {
+		int cmd_idx = (latest_cmd+CMD_HIST-i) % CMD_HIST;
+		if (args[0][0] == histories[cmd_idx][0][0]) {
+			return cmd_idx;
+		}
+	}
+	return -1;
+}
+
+/* print the command at index idx */
+void print_cmd(int idx) {
+	int i = 0;
+	while (histories[idx][i][0] != '\0') {
+		write(STDOUT_FILENO, histories[idx][i], strlen(histories[idx][i]));
+		write(STDOUT_FILENO, " ", strlen(" "));
+		++i;
+	}
+	if (backgrounds[idx] == 1) {
+		write(STDOUT_FILENO, "&", strlen("&"));
+	}
+	write(STDOUT_FILENO, "\n", strlen("\n"));
+}
+
+
+/**
+ * setup() reads in the next command line, separating it into distinct tokens
+ * using whitespace as delimiters. setup() sets the args parameter as a 
+ * null-terminated string.
  */
-#define MAX_LINE 80
-#define BUFFER_SIZE 80
-#define HIST_SIZE 10
+int setup(char inputBuffer[], char *args[],int *background)
+{
+    int length, /* # of characters in the command line */
+        i,      /* loop index for accessing inputBuffer array */
+        start,  /* index where beginning of next command parameter is */
+        ct;     /* index of where to place the next parameter into args[] */
+    
+    ct = 0;
+    
+    /* read what the user enters on the command line */
+    length = read(STDIN_FILENO, inputBuffer, MAX_LINE);  
 
-static char buffer[BUFFER_SIZE];
-char history[HIST_SIZE][BUFFER_SIZE];
-int count = 0;
-int caught = 0;
-char historyFileLoc[] = "./kusold.history";
+    start = -1;
+    if (length == 0)
+        exit(0);            /* ^d was entered, end of user command stream */
+    if (length < 0){
+        perror("error reading the command");
+	exit(-1);           /* terminate with error code of -1 */
+    }
+    
+    /* examine every character in the inputBuffer */
+    for (i = 0; i < length; i++) { 
+        switch (inputBuffer[i]){
+        case ' ':
+        case '\t' :               /* argument separators */
+            if(start != -1){
+                args[ct] = &inputBuffer[start];    /* set up pointer */
+                ct++;
+            }
+            inputBuffer[i] = '\0'; /* add a null char; make a C string */
+            start = -1;
+            break;
+            
+        case '\n':                 /* should be the final char examined */
+            if (start != -1){
+                args[ct] = &inputBuffer[start];     
+                ct++;
+            }
+            inputBuffer[i] = '\0';
+            args[ct] = NULL; /* no more arguments to this command */
+            break;
 
-void loadHistory() {
-	int i;
-	char histCommand[BUFFER_SIZE];
-	
-	i = 0;
-	FILE *hisFile = fopen(historyFileLoc, "r");
-	
-	if( hisFile ) {
-		/*If a user edits the history file, only the first ten entries will be loaded */
-		while(!feof(hisFile)) {
-			strcpy(histCommand, "\0");
-			fgets(histCommand, MAX_LINE, hisFile);
-			if (strcmp(histCommand, "\0") != 0) {
-				strcpy(history[i], histCommand);
-			}
-			i++;
-			count++;
-		}
-	}
-	
-	if(hisFile != NULL){
-		if(fclose(hisFile) != 0) {
-			perror("History file (r) was not closed correctly");
-		}
-	}
-}
-
-void saveHistory() {
-	int i;
-	
-	FILE *hisFile = fopen(historyFileLoc, "w");
-
-/* Writes the history to hisFile */
-	for(i=0; i < HIST_SIZE; i++){
-			strcpy(buffer, history[i]);
-			if(strcmp(buffer,"\0") != 0) {
-				fprintf(hisFile,"%s", buffer);
-			}
-	}
-	if(fclose(hisFile) != 0) {
-		perror("History file was not closed correctly");
-	}
-}
-
-
-void printHistory() {
-	int i;
-	int j = 0;
-	int histcount = count;
-	
-	printf("\n");
-	for (i=0; i < HIST_SIZE; i++) {
-		printf("%d.   ",histcount); /* Used to print the correct hitory number */
-		while (history[i][j] != '\n' && history[i][j] != '\0') {
-			printf("%c",history[i][j]);
-			j++;
-		}
-		printf("\n");
-		j=0;
-		
-		histcount--;
-		if(histcount == 0) {
-			break;
-		}
-	}
-	printf("\n");
-	printf("sh -> ");
-}
+        case '&':
+            *background = 1;
+            inputBuffer[i] = '\0';
+            break;
+            
+        default :             /* some other character */
+            if (start == -1)
+                start = i;
+	} 
+    }    
+    args[ct] = NULL; /* just in case the input line was > 80 */
+    return 1;
+} 
 
 /* the signal handler function */
-void handle_SIGINT() {
-	write(STDOUT_FILENO,buffer,strlen(buffer));
-	printHistory();
-	caught = 1;
+/* show the history of the latest_cmd 10 input commands */
+/* change the default behavior of SIGINT handler */
+void handle_SIGINT() 
+{
+	char str[]="show histories (up to 10):\n";
+	write(STDOUT_FILENO, str, strlen(str));
+	if (num_hist < CMD_HIST) {
+		int i = 0;
+		for (; i < num_hist; ++i) {
+			print_cmd(i);
+		}
+	} else {
+		int i = 0;
+		for (; i < CMD_HIST; ++i) {
+			int hist_idx = (latest_cmd+1+i) % CMD_HIST;
+			print_cmd(hist_idx);
+		}
+	}
+	flag = 1;
+	write(STDOUT_FILENO, "COMMAND->", strlen("COMMAND->"));
+	fflush(stdout);
 }
 
-void setup(char inputBuffer[], char *args[], int *background) {
-	int length, /* # of characters in the command line */
-	i, /* loop index for accessing inputBuffer array */
-	start, /* index where beginning of next command parameter is */
-	ct, /* index of where to place the next parameter into args[] */
-	k; /* Generic counter */
-	
-	ct = 0;
-	
-	/* read what the user enters on the command line */
-	length = read(STDIN_FILENO, inputBuffer, MAX_LINE);
-	
-	if(caught == 1) {
-		length = read(STDIN_FILENO, inputBuffer, MAX_LINE);
-		caught = 0;
-	}
-	
-	/* checks to see if the command is a history retrieval command. If it isn't then add it to the history */
-	if((strcmp(inputBuffer, "r\n\0") != 0) && (strncmp(inputBuffer, "r x", 2) != 0) ) {
-		for(i= (HIST_SIZE - 1); i>0; i--) {
-			strcpy(history[i], history[i-1]);
-		}
-		strcpy(history[0], inputBuffer);
-		count++;
-	}
-	start = -1;
-	if (length == 0) {
-		saveHistory();
-		exit(0); /* ^d was entered, end of user command stream */
-	} else if ((length < 0) && (errno != EINTR)) {
-		perror("error reading the command");
-		saveHistory();
-		exit(-1); /* terminate with error code of -1 */
-	}
-	
-	/* Checks to see if r was entered. If so, it copies the command most recently in the input buffer */
-	if(strcmp(inputBuffer, "r\n\0") == 0) {
-		strcpy(inputBuffer,history[0]);
-		/* Checks to see if r x was entered. If so then it searches for the most recent command that begins with x */	
-	} else if(strncmp(inputBuffer, "r x", 2) == 0) {
-		for(k=0; k<10; k++){
-			if(inputBuffer[2] == history[k][0]) {
-				strcpy(inputBuffer,history[k]);
-				break;
-			}
-		}
-	}
-	
-	length = strlen(inputBuffer);
-	
-	/* examine every character in the inputBuffer */
-	for (i = 0; i < length; i++) {
-		switch (inputBuffer[i]) {
-			case ' ':
-			case '\t': /* argument separators */
-				if (start != -1) {
-					args[ct] = &inputBuffer[start]; /* set up pointer */
-					ct++;
-				}
-				inputBuffer[i] = '\0'; /* add a null char; make a C string */
-				start = -1;
-				break;
-				
-			case '\n': /* should be the final char examined */
-				if (start != -1) {
-					args[ct] = &inputBuffer[start];
-					ct++;
-				}
-				inputBuffer[i] = '\0';
-				args[ct] = NULL; /* no more arguments to this command */
-				break;
-			case '&':
-				*background = 1;
-				inputBuffer[i] = '\0';
-				break;
-				
-			default: /* some other character */
-				if (start == -1) {
-					start = i;
-				}
-		}
-		args[ct] = NULL; /* just in case the input line was > 80 */
-	}
-}
-
-
-/*
- * The main() function presents the prompt "sh>" and then invokes setup(), which waits for the
- *  user to enter a command. The contents of the command entered by the user are loaded into the
- *  args array. For example, if the user enters ls -l at the COMMAND-> prompt, args[0] will be set
- *  to the string ls and args[1] will be set to the string Ðl. (By ÒstringÓ, we mean a
- *  null-terminated, C-style string variable.)
- */
-int main(void) {
+int main(int argc, char *argv[]) 
+{
 	char inputBuffer[MAX_LINE]; /* buffer to hold the command entered */
-	int background, status,i; /* equals 1 if a command is followed by '&' */
-	char *args[MAX_LINE / 2 + 1]; /* command line arguments */
-	pid_t pid; /* the process's id */
-	
-	for(i=0; i < HIST_SIZE; i++){
-		memset(history[i],'\0', sizeof(history[i]));
-	}
-	memset(inputBuffer, '\0', sizeof(inputBuffer));
-	
+    	int background;             /* equals 1 if a command is followed by '&' */
+	int len;
+    	char *args[MAX_LINE/2+1];   /* command line (of 80) has max of 40 arguments */
+	char rawInput[MAX_LINE];
+    	int pid, ret, cmd, cmd_idx;
+
 	/* set up the signal handler */
 	struct sigaction handler;
 	handler.sa_handler = handle_SIGINT;
+	sigemptyset(&handler.sa_mask); /* block other signal interuption */
+	handler.sa_flags = SA_RESTART; /* restrat the system call*/ 
 	sigaction(SIGINT, &handler, NULL);
-	
-	loadHistory();
-	
-	while (1) {
+
+
+	/* wait for <control> <C> */
+	while (1) 
+	{
 		background = 0;
-		strcpy(inputBuffer, "\0");
-		
-		printf("\nsh ->");
-		fflush(0);
-		setup(inputBuffer, args, &background); /* get next command */
-		fflush(0);
-		pid = fork(); /* assign the process id */
-		if (pid < 0) {
-			fprintf(stderr, "ERROR: Could not properly fork.");
-			saveHistory();
-			exit(-1); /* unsucessful exit because the fork could not be created */
-		} else if(pid == 0 ){ /* PID was forked successfully */
-			status = execvp(*args, args); /* execute the command */
-			if (status < 0) {
-				fprintf(stderr, "ERROR: Could not execute %s", args[0]);
-				saveHistory();
-				exit(1);
-			}
-		} else if (background == 0) { /* if the fork is run in the foreground */
-			wait(NULL);
+		printf("COMMAND->");
+       		fflush(0);
+        	cmd = setup(inputBuffer, args, &background);       /* get next command */
+
+		/* user issued <Ctrl><c> */
+		if (cmd == 0) {
+			continue;
 		}
+
+		// collect the zombies
+		while (waitpid(-1, &ret, WNOHANG) > 0);
+
+		if (args[0] == NULL) {		/* invalid user input */
+			continue;
+		}
+		// exit
+		if (strcmp("exit", args[0]) == 0) {
+			exit(0);
+		}
+
+		/* run previous command */
+		/* only valid after caught Ctrl C*/
+		if (strcmp("r", args[0]) == 0 && flag == 1) {
+			int arg_idx = 0;
+			if (num_hist == 0) {
+				printf("no history.\n");
+				continue;
+			}
+
+			/* retrieve the index of the corresponding command in the history */
+			if (args[1] != NULL) {
+				cmd_idx = return_cmd(args+1);
+				if (cmd_idx == -1) {
+					printf("no matching history.\n");
+					continue;
+				}
+			} else {
+				cmd_idx = latest_cmd;
+			}	
+			
+			/* retrieve the corresponding command */
+			while (histories[cmd_idx][arg_idx][0] != '\0') {
+				args[arg_idx] = histories[cmd_idx][arg_idx];
+				arg_idx++;
+			}
+			args[arg_idx] = NULL;
+			background = backgrounds[cmd_idx];
+			print_cmd(cmd_idx);
+		}
+		if (strcmp("r", args[0]) == 0 && flag == 0){
+			printf("invalid command!\n");
+			continue;
+		}
+
+		/* store the commmand */
+		if (num_hist < CMD_HIST) {
+			copycmd(num_hist, args);
+			backgrounds[num_hist] = background;
+			latest_cmd = num_hist;
+			num_hist++;
+		} else {
+			latest_cmd = (latest_cmd+1) % CMD_HIST;
+			copycmd(latest_cmd, args);
+			backgrounds[latest_cmd] = background;
+		}
+
+		/* execute user command */
+		pid = fork();
+		if (pid == 0) {
+			ret = execvp(args[0], args);
+			if (ret < 0) {
+				printf("errors in executing user commands.\n");
+				exit(ret);
+			}
+			exit(0);
+		} else {                 
+			if (background == 0) {
+				waitpid(pid, &ret, WCONTINUED);
+				printf("child process return value=%d\n", ret);
+			} 
+		}
+	
+	
 	}
-	return EXIT_SUCCESS;
+
+	return 0;
 }
